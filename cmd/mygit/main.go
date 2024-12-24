@@ -139,6 +139,52 @@ func hashObject(filename string) (string, error) {
 	return hash, nil
 }
 
+type TreeObjectLine struct {
+	Mode int
+	Name string
+	Hash []byte
+}
+
+func parseModeName(line []byte) (mode int, name string, err error) {
+	lineParts := bytes.Split(line, []byte(" "))
+	if len(lineParts) != 2 {
+		return 0, "", fmt.Errorf("tree line is invalid")
+	}
+
+	mode, err = strconv.Atoi(string(lineParts[0]))
+	if len(lineParts) != 2 {
+		return 0, "", fmt.Errorf("error parsing mode")
+	}
+	name = string(lineParts[1])
+	return
+}
+
+func decodeTreeObjectContent(content []byte) (string, error) {
+	// <mode> <name>\0<20_byte_sha>
+	contentPart := content
+	treeObjectLines := make([]TreeObjectLine, 0)
+	for {
+		nullByteIdx := slices.Index(contentPart, byte('\000'))
+		mode, name, err := parseModeName(contentPart[:nullByteIdx])
+		if err != nil {
+			return "", err
+		}
+		hash := contentPart[nullByteIdx+1 : nullByteIdx+21]
+		treeObjectLines = append(treeObjectLines, TreeObjectLine{Mode: mode, Name: name, Hash: hash})
+
+		if nullByteIdx+22 > len(contentPart) {
+			break
+		}
+		contentPart = contentPart[nullByteIdx+22:]
+	}
+
+	output := ""
+	for _, v := range treeObjectLines {
+		output += v.Name + "\n"
+	}
+	return output, nil
+}
+
 // Usage: your_program.sh <command> <arg1> <arg2> ...
 func main() {
 	syscall.Umask(0)
@@ -185,6 +231,18 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Print(string(hash))
+	case "ls-tree":
+		object, err := parseObject(os.Args[3])
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error on reading object %s\n", err.Error())
+			os.Exit(1)
+		}
+		out, err := decodeTreeObjectContent(object.Content)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error on parsing tree object %s\n", err.Error())
+			os.Exit(1)
+		}
+		fmt.Print(out)
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command %s\n", command)
 		os.Exit(1)
