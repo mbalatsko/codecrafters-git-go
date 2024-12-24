@@ -1,19 +1,25 @@
 package main
 
 import (
+	"bytes"
 	"compress/zlib"
+	"crypto/sha1"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
+	"syscall"
 )
+
+const mode = 0755
 
 type Type string
 
 const (
-	TypeObject Type = "object"
+	TypeBlob   Type = "blob"
 	TypeTree   Type = "tree"
 	TypeCommit Type = "commit"
 	TypeTag    Type = "tag"
@@ -23,6 +29,14 @@ type Object struct {
 	Type    Type
 	Size    int
 	Content []byte
+}
+
+func getObjectDir(hash string) string {
+	return filepath.Join(".git", "objects", hash[:2])
+}
+
+func getObjectPath(hash string) string {
+	return filepath.Join(getObjectDir(hash), hash[2:])
 }
 
 func parseType(data []byte) (_type Type, endIdx int) {
@@ -39,7 +53,7 @@ func parseSize(data []byte, startIdx int) (size int, endIdx int, err error) {
 }
 
 func parseObject(hash string) (*Object, error) {
-	objectPath := filepath.Join(".git", "objects", hash[:2], hash[2:])
+	objectPath := getObjectPath(hash)
 
 	f, err := os.Open(objectPath)
 	if err != nil {
@@ -71,8 +85,63 @@ func parseObject(hash string) (*Object, error) {
 	}, nil
 }
 
+func createObjectDir(hash string) error {
+	objectDir := getObjectDir(hash)
+	if _, err := os.Stat(objectDir); os.IsNotExist(err) {
+		return os.MkdirAll(objectDir, mode)
+	}
+	return nil
+}
+
+func hashObject(filename string) (string, error) {
+	srcF, err := os.Open(filename)
+	if err != nil {
+		return "", fmt.Errorf("failed to open %s: %s", filename, err.Error())
+	}
+	defer srcF.Close()
+
+	content, err := io.ReadAll(srcF)
+	if err != nil {
+		return "", fmt.Errorf("failed to read all from file %s: %s", filename, err.Error())
+	}
+
+	_type := []byte(TypeBlob)
+
+	size := len(content)
+	sizeBytes := []byte(strconv.Itoa(size))
+
+	data := make([]byte, 0, len(_type)+1+len(sizeBytes)+1+len(content))
+	data = append(data, _type...)
+	data = append(data, byte(' '))
+	data = append(data, sizeBytes...)
+	data = append(data, byte('\000'))
+	data = append(data, content...)
+
+	hasher := sha1.New()
+	hasher.Write(data)
+	hash := hex.EncodeToString(hasher.Sum(nil))
+
+	var b bytes.Buffer
+	w := zlib.NewWriter(&b)
+	w.Write(data)
+	w.Close()
+
+	err = createObjectDir(hash)
+	if err != nil {
+		return "", fmt.Errorf("failed create object dir for hash %s: %s", hash, err.Error())
+	}
+
+	err = os.WriteFile(getObjectPath(hash), b.Bytes(), mode)
+	if err != nil {
+		return "", fmt.Errorf("failed write to object file for hash %s: %s", hash, err.Error())
+	}
+
+	return hash, nil
+}
+
 // Usage: your_program.sh <command> <arg1> <arg2> ...
 func main() {
+	syscall.Umask(0)
 	if len(os.Args) < 2 {
 		fmt.Fprintf(os.Stderr, "usage: mygit <command> [<args>...]\n")
 		os.Exit(1)
@@ -87,7 +156,7 @@ func main() {
 		}
 
 		headFileContents := []byte("ref: refs/heads/main\n")
-		if err := os.WriteFile(".git/HEAD", headFileContents, 0644); err != nil {
+		if err := os.WriteFile(".git/HEAD", headFileContents, mode); err != nil {
 			fmt.Fprintf(os.Stderr, "Error writing file: %s\n", err)
 		}
 
@@ -109,7 +178,13 @@ func main() {
 			fmt.Fprintf(os.Stderr, "Unknown command %s\n", os.Args)
 			os.Exit(1)
 		}
-
+	case "hash-object":
+		hash, err := hashObject(os.Args[3])
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error on hashing object %s\n", err.Error())
+			os.Exit(1)
+		}
+		fmt.Print(string(hash))
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command %s\n", command)
 		os.Exit(1)
