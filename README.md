@@ -1,4 +1,4 @@
-[![progress-banner](https://backend.codecrafters.io/progress/git/69efa81b-6b88-4abc-b63f-392af9a788ed)](https://app.codecrafters.io/users/codecrafters-bot?r=2qF)
+[![progress-banner](https://backend.codecrafters.io/progress/git/69efa81b-6b88-4abc-b63f-392af9a788ed)](https://app.codecrafters.io/users/mbalatsko?r=2qF)
 
 This is a starting point for Go solutions to the
 ["Build Your Own Git" Challenge](https://codecrafters.io/challenges/git).
