@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sort"
 	"strconv"
 	"syscall"
 )
@@ -93,50 +94,53 @@ func createObjectDir(hash string) error {
 	return nil
 }
 
-func hashObject(filename string) (string, error) {
+func saveObjectFile(content []byte, hash []byte) error {
+	var b bytes.Buffer
+	w := zlib.NewWriter(&b)
+	w.Write(content)
+	w.Close()
+
+	hashStr := hex.EncodeToString(hash)
+	err := createObjectDir(hashStr)
+	if err != nil {
+		return fmt.Errorf("failed create object dir for hash %s: %s", hashStr, err.Error())
+	}
+
+	err = os.WriteFile(getObjectPath(hashStr), b.Bytes(), mode)
+	if err != nil {
+		return fmt.Errorf("failed write to object file for hash %s: %s", hashStr, err.Error())
+	}
+	return nil
+}
+
+func calculateObjectBytesHash(data []byte) []byte {
+	hasher := sha1.New()
+	hasher.Write(data)
+	return hasher.Sum(nil)
+}
+
+func writeBlobObject(filename string) ([]byte, error) {
 	srcF, err := os.Open(filename)
 	if err != nil {
-		return "", fmt.Errorf("failed to open %s: %s", filename, err.Error())
+		return nil, fmt.Errorf("failed to open %s: %s", filename, err.Error())
 	}
 	defer srcF.Close()
 
 	content, err := io.ReadAll(srcF)
 	if err != nil {
-		return "", fmt.Errorf("failed to read all from file %s: %s", filename, err.Error())
+		return nil, fmt.Errorf("failed to read all from file %s: %s", filename, err.Error())
 	}
 
-	_type := []byte(TypeBlob)
+	lineStr := fmt.Sprintf("%s %d\u0000", TypeBlob, len(content))
+	lineBytes := []byte(lineStr)
+	lineBytes = append(lineBytes, content...)
 
-	size := len(content)
-	sizeBytes := []byte(strconv.Itoa(size))
-
-	data := make([]byte, 0, len(_type)+1+len(sizeBytes)+1+len(content))
-	data = append(data, _type...)
-	data = append(data, byte(' '))
-	data = append(data, sizeBytes...)
-	data = append(data, byte('\000'))
-	data = append(data, content...)
-
-	hasher := sha1.New()
-	hasher.Write(data)
-	hash := hex.EncodeToString(hasher.Sum(nil))
-
-	var b bytes.Buffer
-	w := zlib.NewWriter(&b)
-	w.Write(data)
-	w.Close()
-
-	err = createObjectDir(hash)
+	hashBytes := calculateObjectBytesHash(lineBytes)
+	err = saveObjectFile(lineBytes, hashBytes)
 	if err != nil {
-		return "", fmt.Errorf("failed create object dir for hash %s: %s", hash, err.Error())
+		return nil, fmt.Errorf("failed to save file %s: %s", filename, err.Error())
 	}
-
-	err = os.WriteFile(getObjectPath(hash), b.Bytes(), mode)
-	if err != nil {
-		return "", fmt.Errorf("failed write to object file for hash %s: %s", hash, err.Error())
-	}
-
-	return hash, nil
+	return hashBytes, nil
 }
 
 type TreeObjectLine struct {
@@ -162,7 +166,7 @@ func parseModeName(line []byte) (mode int, name string, err error) {
 func decodeTreeObjectContent(content []byte) (string, error) {
 	// <mode> <name>\0<20_byte_sha>
 	contentPart := content
-	treeObjectLines := make([]TreeObjectLine, 0)
+	treeObjectLines := make([]TreeObjectLine, 0, 10)
 	for {
 		nullByteIdx := slices.Index(contentPart, byte('\000'))
 		mode, name, err := parseModeName(contentPart[:nullByteIdx])
@@ -183,6 +187,67 @@ func decodeTreeObjectContent(content []byte) (string, error) {
 		output += v.Name + "\n"
 	}
 	return output, nil
+}
+
+func writeTreeObject(dirPath string) ([]byte, error) {
+	files, err := os.ReadDir(dirPath)
+	if err != nil {
+		return nil, err
+	}
+
+	type entry struct {
+		fileName  string
+		lineBytes []byte
+	}
+
+	entries := make([]entry, 0, len(files)-1)
+	totalSize := 0
+	for _, file := range files {
+
+		if file.Name() == ".git" {
+			continue
+		}
+
+		fileInfo, err := file.Info()
+		if err != nil {
+			return nil, err
+		}
+
+		if fileInfo.IsDir() {
+			hashBytes, err := writeTreeObject(filepath.Join(dirPath, fileInfo.Name()))
+			if err != nil {
+				return nil, err
+			}
+			lineStr := fmt.Sprintf("40000 %s\u0000", fileInfo.Name())
+			lineBytes := append([]byte(lineStr), hashBytes...)
+			entries = append(entries, entry{fileInfo.Name(), lineBytes})
+			totalSize += len(lineBytes)
+		} else {
+			hashBytes, err := writeBlobObject(filepath.Join(dirPath, fileInfo.Name()))
+			if err != nil {
+				return nil, err
+			}
+			lineStr := fmt.Sprintf("%o %s\u0000", os.FileMode(0o100000)|fileInfo.Mode().Perm(), fileInfo.Name())
+			lineBytes := append([]byte(lineStr), hashBytes...)
+			entries = append(entries, entry{fileInfo.Name(), lineBytes})
+			totalSize += len(lineBytes)
+		}
+	}
+
+	sort.Slice(entries, func(i, j int) bool { return entries[i].fileName < entries[j].fileName })
+	lineStr := fmt.Sprintf("%s %d\u0000", TypeTree, totalSize)
+	lineBytes := []byte(lineStr)
+	for _, entry := range entries {
+		lineBytes = append(lineBytes, entry.lineBytes...)
+	}
+	hashBytes := calculateObjectBytesHash(lineBytes)
+
+	err = saveObjectFile(lineBytes, hashBytes)
+	if err != nil {
+		return nil, err
+	}
+
+	return hashBytes, nil
 }
 
 // Usage: your_program.sh <command> <arg1> <arg2> ...
@@ -225,12 +290,12 @@ func main() {
 			os.Exit(1)
 		}
 	case "hash-object":
-		hash, err := hashObject(os.Args[3])
+		hash, err := writeBlobObject(os.Args[3])
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error on hashing object %s\n", err.Error())
 			os.Exit(1)
 		}
-		fmt.Print(string(hash))
+		fmt.Print(string(hex.EncodeToString(hash)))
 	case "ls-tree":
 		object, err := parseObject(os.Args[3])
 		if err != nil {
@@ -243,6 +308,13 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Print(out)
+	case "write-tree":
+		hash, err := writeTreeObject(".")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error on writing tree %s\n", err.Error())
+			os.Exit(1)
+		}
+		fmt.Print(string(hex.EncodeToString(hash)))
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command %s\n", command)
 		os.Exit(1)
