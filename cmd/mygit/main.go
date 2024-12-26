@@ -250,6 +250,27 @@ func writeTreeObject(dirPath string) ([]byte, error) {
 	return hashBytes, nil
 }
 
+func commitTree(treeSha string, parentSha string, message string) ([]byte, error) {
+	content := []byte(fmt.Sprintf(
+		"tree %s\nparent %s\nauthor Max <email@example.com> 0 +0000\ncommitter Max <email@example.com> 0 +0000\n\n%s\n",
+		treeSha,
+		parentSha,
+		message,
+	))
+
+	lineStr := fmt.Sprintf("%s %d\u0000", TypeCommit, len(content))
+	lineBytes := []byte(lineStr)
+	lineBytes = append(lineBytes, content...)
+	hashBytes := calculateObjectBytesHash(lineBytes)
+
+	err := saveObjectFile(lineBytes, hashBytes)
+	if err != nil {
+		return nil, err
+	}
+
+	return hashBytes, nil
+}
+
 // Usage: your_program.sh <command> <arg1> <arg2> ...
 func main() {
 	syscall.Umask(0)
@@ -310,6 +331,13 @@ func main() {
 		fmt.Print(out)
 	case "write-tree":
 		hash, err := writeTreeObject(".")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error on writing tree %s\n", err.Error())
+			os.Exit(1)
+		}
+		fmt.Print(string(hex.EncodeToString(hash)))
+	case "commit-tree":
+		hash, err := commitTree(os.Args[2], os.Args[4], os.Args[6])
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error on writing tree %s\n", err.Error())
 			os.Exit(1)
